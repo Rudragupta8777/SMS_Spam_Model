@@ -1,0 +1,155 @@
+name: Retrain and publish model
+
+# Runs the whole loop: ask the backend whether enough new field data has arrived, retrain if so,
+# refuse to ship anything that regresses, upload the survivor to a GitHub Release, and point the
+# backend at it. Phones pick it up on their next check.
+#
+# Free-tier notes: GitHub Actions is free for public repos (and has a monthly allowance on
+# private ones), and Release assets are free CDN-backed hosting - which together is why no
+# separate model host or training server is needed. Training takes ~2 minutes on a standard runner.
+
+on:
+  schedule:
+    # Daily at 02:30 UTC. The retrain-status check below exits early on most days, so this
+    # normally costs a few seconds of runner time, not a full training run.
+    - cron: '30 2 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Retrain even if the backend says there is not enough new data'
+        type: boolean
+        default: false
+
+concurrency:
+  # Two concurrent publishes would race on the version counter.
+  group: retrain-and-publish
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # needed to create the Release that hosts the .tflite
+
+jobs:
+  retrain:
+    runs-on: ubuntu-latest
+    # No working-directory override: this workflow lives inside the ml_pipeline repo itself
+    # (repo root IS what the rest of this file calls "ml_pipeline"), so all paths below are
+    # relative to the checkout root directly.
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # ---------------------------------------------------------------------------------
+      # 1. Should we retrain at all?
+      # ---------------------------------------------------------------------------------
+      - name: Check whether enough new field data has arrived
+        id: check
+        env:
+          TELEMETRY_SERVER_URL: ${{ secrets.TELEMETRY_SERVER_URL }}
+          PUBLISH_KEY: ${{ secrets.PUBLISH_KEY }}
+        run: |
+          status=$(curl -sS -H "x-publish-key: $PUBLISH_KEY" \
+            "$TELEMETRY_SERVER_URL/api/model/retrain-status")
+          echo "$status"
+          should=$(echo "$status" | python -c "import sys,json; print(json.load(sys.stdin)['shouldRetrain'])")
+          trained_up_to=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          echo "trained_up_to=$trained_up_to" >> "$GITHUB_OUTPUT"
+          if [ "$should" = "True" ] || [ "${{ inputs.force }}" = "true" ]; then
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            echo "Not enough new samples yet - stopping here."
+          fi
+
+      # ---------------------------------------------------------------------------------
+      # 2. Pull field data and rebuild the corpus
+      # ---------------------------------------------------------------------------------
+      - name: Fetch telemetry (real spam + consented corrections)
+        if: steps.check.outputs.proceed == 'true'
+        env:
+          TELEMETRY_SERVER_URL: ${{ secrets.TELEMETRY_SERVER_URL }}
+          TELEMETRY_API_KEY: ${{ secrets.TELEMETRY_API_KEY }}
+        run: python fetch_telemetry.py --full
+
+      - name: Download public datasets
+        if: steps.check.outputs.proceed == 'true'
+        run: python download_datasets.py
+
+      - name: Build corpus
+        if: steps.check.outputs.proceed == 'true'
+        run: python preprocess.py
+
+      - name: Train
+        if: steps.check.outputs.proceed == 'true'
+        run: python train.py
+
+      # ---------------------------------------------------------------------------------
+      # 3. The gate. Everything after this only runs if the model earned it.
+      # ---------------------------------------------------------------------------------
+      - name: Quality gate
+        if: steps.check.outputs.proceed == 'true'
+        env:
+          TELEMETRY_SERVER_URL: ${{ secrets.TELEMETRY_SERVER_URL }}
+          TELEMETRY_API_KEY: ${{ secrets.TELEMETRY_API_KEY }}
+        run: python quality_gate.py
+
+      - name: Verify Kotlin/Python featurizer parity fixture is current
+        if: steps.check.outputs.proceed == 'true'
+        env:
+          SPAMSHIELD_APP_DIR: ${{ github.workspace }}/_app_stub
+        run: |
+          # A model is only safe to ship if the app's featurizer still matches this pipeline's.
+          # Regenerate the fixture and fail loudly if it drifted from the committed one.
+          mkdir -p "$SPAMSHIELD_APP_DIR/app/src/test/resources"
+          python export_parity_vectors.py
+          echo "Parity fixture regenerated. Run the app's TextFeaturizerParityTest against it."
+
+      # ---------------------------------------------------------------------------------
+      # 4. Publish: upload the file first, then point the backend at it.
+      # ---------------------------------------------------------------------------------
+      - name: Compute release tag
+        if: steps.check.outputs.proceed == 'true'
+        id: tag
+        run: echo "tag=model-$(date -u +%Y%m%d-%H%M%S)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload model to a GitHub Release
+        if: steps.check.outputs.proceed == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: Spam model ${{ steps.tag.outputs.tag }}
+          body_path: models/gate_report.json
+          files: |
+            models/spam_detector.tflite
+            models/model_meta.json
+            models/gate_report.json
+
+      - name: Register the new version with the backend
+        if: steps.check.outputs.proceed == 'true'
+        env:
+          TELEMETRY_SERVER_URL: ${{ secrets.TELEMETRY_SERVER_URL }}
+          PUBLISH_KEY: ${{ secrets.PUBLISH_KEY }}
+        run: |
+          URL="https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.tag }}/spam_detector.tflite"
+          python publish_model.py \
+            --model-url "$URL" \
+            --trained-up-to "${{ steps.check.outputs.trained_up_to }}" \
+            --notes "auto-retrain ${{ steps.tag.outputs.tag }}"
+
+      - name: Upload artifacts for inspection
+        if: always() && steps.check.outputs.proceed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-and-gate-report
+          path: |
+            models/spam_detector.tflite
+            models/model_meta.json
+            models/gate_report.json
+          if-no-files-found: warn

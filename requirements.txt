@@ -1,0 +1,10 @@
+# Pinned so a CI retrain produces the same model the gate was calibrated against.
+# A silent TensorFlow minor bump can change conversion behaviour, which is exactly the kind of
+# drift the quality gate exists to catch - but it is cheaper not to introduce it in the first place.
+tensorflow==2.21.0
+pandas==3.0.5
+numpy==2.5.2
+scikit-learn==1.9.0
+requests==2.34.2
+pyarrow==25.0.1
+python-dotenv==1.0.1

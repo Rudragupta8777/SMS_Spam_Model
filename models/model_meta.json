@@ -1,0 +1,11 @@
+{
+  "threshold": 0.7155976295471191,
+  "num_buckets": 20000,
+  "max_features": 256,
+  "char_ngrams": [
+    3,
+    4
+  ],
+  "use_word_bigrams": true,
+  "embed_dim": 32
+}

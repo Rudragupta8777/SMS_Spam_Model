@@ -72,6 +72,7 @@ def main():
         "featureContract": {
             "numBuckets": int(meta["num_buckets"]),
             "maxFeatures": int(meta["max_features"]),
+            "featureVersion": int(meta["feature_version"]),
         },
         "metrics": {
             "realF1": gate["realF1"],

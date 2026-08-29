@@ -23,6 +23,7 @@ Anything changed in this file MUST be mirrored in the Kotlin TextFeaturizer, whi
 by parity_vectors.json + TextFeaturizerParityTest (see export_parity_vectors.py).
 """
 
+import re
 import unicodedata
 
 # --- Feature contract. Changing any of these invalidates a trained model. ---
@@ -31,6 +32,54 @@ MAX_FEATURES = 256    # fixed input length fed to the model
 PAD_ID = 0            # reserved, never emitted by the hash
 CHAR_NGRAMS = (3, 4)  # char n-gram sizes taken inside word boundaries
 USE_WORD_BIGRAMS = True
+
+# Bumped whenever tokenize()/normalize() semantics change, even if NUM_BUCKETS/MAX_FEATURES stay
+# the same. That distinction matters: a model trained under the OLD tokenization loaded with the
+# NEW code (or vice versa) would not throw - it would silently classify with different features
+# than it was trained on. NUM_BUCKETS/MAX_FEATURES only catch a SHAPE mismatch; this would catch
+# a SEMANTIC one. Currently 1 (unchanged) - see mask_digits' docstring for why digit masking
+# stayed OUT of this pipeline despite being built and measured.
+FEATURE_VERSION = 1
+
+MASK_TOKEN = "XXXX"
+MIN_DIGIT_RUN_TO_MASK = 3
+_DIGIT_RUN = re.compile(r"\d{%d,}" % MIN_DIGIT_RUN_TO_MASK)
+
+
+def mask_digits(text: str) -> str:
+    """Replaces runs of MIN_DIGIT_RUN_TO_MASK+ consecutive digits with a fixed placeholder.
+
+    Used ONLY for the text uploaded to the telemetry backend (TelemetryClient calls this
+    directly before building the request), NOT inside normalize()/tokenize() below. That
+    exclusion is deliberate and measured, not an oversight:
+
+    Masking digits before feature extraction was implemented and evaluated. Two independent
+    retrains both landed real-holdout F1 around 0.85-0.88, down from 0.9744, with the drop
+    outside the model's own bootstrap confidence interval - a real regression, not noise. The
+    false negatives it introduced mostly did not even contain digits, which means the harm
+    wasn't "losing signal from this message's own numbers" - masking every digit-heavy spam
+    template down to a shared "XXXX" token changed what the whole embedding table learns to
+    weight, and that shift generalized worse to the small set of genuinely real spam messages
+    this project has. So: raw digits ARE still fed to the classifier (unchanged from before this
+    feature existed), but they never reach the backend - see TelemetryClient's privacy comment.
+
+    The placeholder is a FIXED string regardless of the matched run's length, so a 4-digit OTP
+    and a 10-digit phone number both become "XXXX" - the placeholder's length does not leak how
+    many digits were redacted. Padded with spaces so "Rs50000" splits into "rs" + "XXXX" instead
+    of merging into one unrecognizable token.
+
+    Deliberately per contiguous run only, not separator-spanning: "98765-43210" masks to
+    "XXXX-XXXX", not one blended placeholder. A regex greedy enough to span separators would
+    also catch ordinary sentences like "meet at 5 - 6 pm", which this avoids.
+
+    `\\d` matches any Unicode decimal digit (category Nd) for str patterns in Python 3, not just
+    ASCII 0-9, so Devanagari/Arabic-indic digits are masked too - the Kotlin port uses `\\p{Nd}`
+    for the same reason; see the parity fixture for a probe covering non-ASCII digits.
+    """
+    if not isinstance(text, str):
+        return ""
+    return _DIGIT_RUN.sub(f" {MASK_TOKEN} ", text)
+
 
 _FNV_OFFSET = 0x811C9DC5
 _FNV_PRIME = 0x01000193
@@ -66,8 +115,11 @@ def _is_kept(ch: str) -> bool:
 
 
 def normalize(text: str) -> str:
-    """Lowercase and keep only letters/marks/digits of ANY script, collapsing everything else to
-    a single space. Unlike the old `[^a-z0-9 ]` regex this preserves Devanagari/Tamil/Arabic."""
+    """Lowercases and keeps only letters/marks/digits of ANY script, collapsing everything else
+    to a single space. Unlike the old `[^a-z0-9 ]` regex this preserves Devanagari/Tamil/Arabic.
+
+    Deliberately does NOT mask digits (see mask_digits' docstring) - that was tried and measurably
+    hurt real-holdout recall, so raw digits still reach the classifier here."""
     if not isinstance(text, str):
         return ""
     out = []

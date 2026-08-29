@@ -127,16 +127,23 @@ def main():
 
     interp, inp, out, meta = load_candidate()
 
-    # --- 2. feature contract ---
+    # --- 2. feature contract (shape AND semantics) ---
     if meta.get("num_buckets") != tf_feat.NUM_BUCKETS or \
        meta.get("max_features") != tf_feat.MAX_FEATURES:
         failures.append(
             f"feature contract mismatch: model_meta says "
             f"{meta.get('num_buckets')}/{meta.get('max_features')}, "
             f"text_features.py says {tf_feat.NUM_BUCKETS}/{tf_feat.MAX_FEATURES}")
+    elif meta.get("feature_version") != tf_feat.FEATURE_VERSION:
+        # Same shape, different tokenization semantics (e.g. digit masking added/changed) - the
+        # dangerous mismatch that num_buckets/max_features alone cannot see.
+        failures.append(
+            f"feature_version mismatch: model_meta says {meta.get('feature_version')}, "
+            f"text_features.py says {tf_feat.FEATURE_VERSION} - this model was trained under "
+            f"different tokenization semantics than this code implements")
     else:
         print(f"  [ok] feature contract {tf_feat.NUM_BUCKETS} buckets / "
-              f"{tf_feat.MAX_FEATURES} features")
+              f"{tf_feat.MAX_FEATURES} features / feature_version {tf_feat.FEATURE_VERSION}")
 
     threshold = float(meta["threshold"])
 

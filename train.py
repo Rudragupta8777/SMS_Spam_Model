@@ -167,6 +167,9 @@ def main():
         "threshold": threshold,
         "num_buckets": tf_feat.NUM_BUCKETS,
         "max_features": tf_feat.MAX_FEATURES,
+        # Catches a SEMANTIC tokenizer change (e.g. this one - digit masking) that num_buckets/
+        # max_features can't see, because they don't change shape. See FEATURE_VERSION's docstring.
+        "feature_version": tf_feat.FEATURE_VERSION,
         "char_ngrams": list(tf_feat.CHAR_NGRAMS),
         "use_word_bigrams": tf_feat.USE_WORD_BIGRAMS,
         "embed_dim": EMBED_DIM,

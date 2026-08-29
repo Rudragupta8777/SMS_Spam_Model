@@ -1,7 +1,8 @@
 {
-  "threshold": 0.7155976295471191,
+  "threshold": 0.6821048259735107,
   "num_buckets": 20000,
   "max_features": 256,
+  "feature_version": 1,
   "char_ngrams": [
     3,
     4
